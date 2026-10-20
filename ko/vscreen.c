@@ -39,7 +39,6 @@
 #include <drm/drm_prime.h>
 #include <drm/drm_file.h>
 #include <linux/dma-buf.h>
-#include <linux/dma-buf-map.h>
 #include <drm/drm_fourcc.h>
 #endif
 
