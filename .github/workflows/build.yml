@@ -34,32 +34,34 @@ jobs:
           git checkout "$KCOMMIT" 2>/dev/null \
             || echo "[warn] commit $KCOMMIT not reachable, using branch head"
 
-      - name: Install AOSP clang (r416183b)
+      - name: Install toolchain (clang-14 + lld)
         run: |
-          mkdir -p "$HOME/clang" && cd "$HOME/clang"
-          curl -sL "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main-kernel-build-2021/clang-r416183b.tar.gz" -o clang.tar.gz
-          tar xf clang.tar.gz
-          ls
+          sudo apt-get update
+          sudo apt-get install -y clang-14 lld-14 libarchive-tools
+          echo "/usr/lib/llvm-14/bin" >> "$GITHUB_PATH"
 
       - name: Prepare kernel (gki_defconfig + LOCALVERSION 对齐设备)
         run: |
           cd ksrc
-          export PATH="$HOME/clang/bin:$PATH"
+          export PATH="/usr/lib/llvm-14/bin:$PATH"
           export LOCALVERSION="-${KLOCAL}"
-          make ARCH=arm64 gki_defconfig LLVM=1 LLVM_IAS=1
+          export CC=clang-14 LD=ld.lld-14 LLVM=1 LLVM_IAS=1
+          make ARCH=arm64 gki_defconfig
           ./scripts/config --file .config \
             --set-str LOCALVERSION "-${KLOCAL}" \
             -d CONFIG_MODULE_SIG_FORCE \
             -d CONFIG_MODULE_SIG_ALL
-          make ARCH=arm64 LLVM=1 LLVM_IAS=1 -j"$(nproc)" prepare modules_prepare
+          make ARCH=arm64 olddefconfig CC=clang-14 LD=ld.lld-14 LLVM=1 LLVM_IAS=1
+          make ARCH=arm64 -j"$(nproc)" prepare modules_prepare \
+            CC=clang-14 LD=ld.lld-14 LLVM=1 LLVM_IAS=1
 
       - name: Build modules
         run: |
           cd ksrc
-          export PATH="$HOME/clang/bin:$PATH"
+          export PATH="/usr/lib/llvm-14/bin:$PATH"
           export LOCALVERSION="-${KLOCAL}"
-          make ARCH=arm64 LLVM=1 LLVM_IAS=1 -j"$(nproc)" \
-            M="$GITHUB_WORKSPACE/ko" modules
+          export CC=clang-14 LD=ld.lld-14 LLVM=1 LLVM_IAS=1
+          make ARCH=arm64 -j"$(nproc)" M="$GITHUB_WORKSPACE/ko" modules
 
       - name: Verify vermagic (必须与设备一致)
         run: |
