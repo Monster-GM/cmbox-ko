@@ -19,8 +19,17 @@ jobs:
       - name: Setup kernel source (AOSP common ${{ env.KBRANCH }})
         run: |
           git config --global init.defaultBranch master
-          git clone --branch "$KBRANCH" --depth 300 \
-            https://android.googlesource.com/kernel/common ksrc
+          ok=0
+          for i in 1 2 3 4 5; do
+            echo "== clone attempt $i =="
+            rm -rf ksrc
+            if git clone --branch "$KBRANCH" --depth 300 \
+                 https://android.googlesource.com/kernel/common ksrc; then
+              ok=1; break
+            fi
+            sleep 15
+          done
+          [ "$ok" = 1 ] || { echo "all clone attempts failed"; exit 1; }
           cd ksrc
           git checkout "$KCOMMIT" 2>/dev/null \
             || echo "[warn] commit $KCOMMIT not reachable, using branch head"
