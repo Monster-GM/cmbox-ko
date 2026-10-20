@@ -228,7 +228,7 @@ static int vs_drm_capture(struct vs_info *i)
         if (IS_ERR(minor)) return PTR_ERR(minor);
         vs_dev = minor->dev;
         p_drm_minor_release(minor);
-        pr_info("vscreen: drm_device attached %s\n", dev->unique);
+        pr_info("vscreen: drm_device attached %s\n", vs_dev->unique);
     }
     dev = vs_dev;
 
