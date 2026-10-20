@@ -58,6 +58,23 @@ jobs:
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC=clang-14 \
             -j"$(nproc)" M="$GITHUB_WORKSPACE/ko" modules
 
+      - name: Patch vermagic → 设备内核字符串
+        run: |
+          cd ko
+          python3 - << 'EOF'
+          import re
+          DEVICE = b"vermagic=5.10.236-android12-9-00003-gfb24cf99ad97-ab14313284 SMP preempt mod_unload modversions aarch64"
+          for f in ("vts.ko", "vscreen.ko"):
+              d = open(f, "rb").read()
+              m = re.search(rb"vermagic=[^\x00]+", d)
+              assert m, f"no vermagic in {f}"
+              old = m.group()
+              assert len(DEVICE) <= len(old), f"device vermagic longer than built ({len(DEVICE)} > {len(old)})"
+              d = d.replace(old, DEVICE + b"\x00" * (len(old) - len(DEVICE)))
+              open(f, "wb").write(d)
+              print(f, "patched:", len(old), "->", len(DEVICE), "bytes")
+          EOF
+
       - name: Verify vermagic (与设备不一致直接判失败)
         run: |
           cd ko
