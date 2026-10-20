@@ -63,7 +63,6 @@ static atomic_t frame_seq = ATOMIC_INIT(0);
 /* ---- 共享输出帧缓冲 (用户态 mmap 目标) ---- */
 static void    *vs_buf;
 static size_t   vs_buf_size;
-static u32      vs_width, vs_height, vs_stride, vs_fourcc_or_bpp;
 
 static int vs_ensure_buf(size_t need)
 {
