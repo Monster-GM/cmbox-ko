@@ -34,34 +34,29 @@ jobs:
           git checkout "$KCOMMIT" 2>/dev/null \
             || echo "[warn] commit $KCOMMIT not reachable, using branch head"
 
-      - name: Install toolchain (clang-14 + lld)
+      - name: Install toolchain (clang-14 + aarch64 binutils)
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-14 lld-14 libarchive-tools
-          echo "/usr/lib/llvm-14/bin" >> "$GITHUB_PATH"
+          sudo apt-get install -y clang-14 gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
 
       - name: Prepare kernel (gki_defconfig + LOCALVERSION 对齐设备)
         run: |
           cd ksrc
-          export PATH="/usr/lib/llvm-14/bin:$PATH"
           export LOCALVERSION="-${KLOCAL}"
-          export CC=clang-14 LD=ld.lld-14 LLVM=1 LLVM_IAS=1
-          make ARCH=arm64 gki_defconfig
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC=clang-14 gki_defconfig
           ./scripts/config --file .config \
             --set-str LOCALVERSION "-${KLOCAL}" \
             -d CONFIG_MODULE_SIG_FORCE \
             -d CONFIG_MODULE_SIG_ALL
-          make ARCH=arm64 olddefconfig CC=clang-14 LD=ld.lld-14 LLVM=1 LLVM_IAS=1
-          make ARCH=arm64 -j"$(nproc)" prepare modules_prepare \
-            CC=clang-14 LD=ld.lld-14 LLVM=1 LLVM_IAS=1
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC=clang-14 \
+            -j"$(nproc)" prepare modules_prepare
 
       - name: Build modules
         run: |
           cd ksrc
-          export PATH="/usr/lib/llvm-14/bin:$PATH"
           export LOCALVERSION="-${KLOCAL}"
-          export CC=clang-14 LD=ld.lld-14 LLVM=1 LLVM_IAS=1
-          make ARCH=arm64 -j"$(nproc)" M="$GITHUB_WORKSPACE/ko" modules
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC=clang-14 \
+            -j"$(nproc)" M="$GITHUB_WORKSPACE/ko" modules
 
       - name: Verify vermagic (必须与设备一致)
         run: |
