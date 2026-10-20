@@ -1,0 +1,71 @@
+name: build-ko (GKI android12-5.10)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master, main]
+
+env:
+  KBRANCH: android12-5.10
+  KCOMMIT: fb24cf99ad97          # 目标设备 vermagic: 5.10.236-android12-9-00003-gfb24cf99ad97-ab14313284
+  KLOCAL:  ab14313284            # 设备 vermagic 里的 build 号
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup kernel source (AOSP common ${{ env.KBRANCH }})
+        run: |
+          git config --global init.defaultBranch master
+          git clone --branch "$KBRANCH" --depth 300 \
+            https://android.googlesource.com/kernel/common ksrc
+          cd ksrc
+          git checkout "$KCOMMIT" 2>/dev/null \
+            || echo "[warn] commit $KCOMMIT not reachable, using branch head"
+
+      - name: Install AOSP clang (r416183b)
+        run: |
+          mkdir -p "$HOME/clang" && cd "$HOME/clang"
+          curl -sL "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main-kernel-build-2021/clang-r416183b.tar.gz" -o clang.tar.gz
+          tar xf clang.tar.gz
+          ls
+
+      - name: Prepare kernel (gki_defconfig + LOCALVERSION 对齐设备)
+        run: |
+          cd ksrc
+          export PATH="$HOME/clang/bin:$PATH"
+          export LOCALVERSION="-${KLOCAL}"
+          make ARCH=arm64 gki_defconfig LLVM=1 LLVM_IAS=1
+          ./scripts/config --file .config \
+            --set-str LOCALVERSION "-${KLOCAL}" \
+            -d CONFIG_MODULE_SIG_FORCE \
+            -d CONFIG_MODULE_SIG_ALL
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 -j"$(nproc)" prepare modules_prepare
+
+      - name: Build modules
+        run: |
+          cd ksrc
+          export PATH="$HOME/clang/bin:$PATH"
+          export LOCALVERSION="-${KLOCAL}"
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 -j"$(nproc)" \
+            M="$GITHUB_WORKSPACE/ko" modules
+
+      - name: Verify vermagic (必须与设备一致)
+        run: |
+          cd ko
+          for k in vts.ko vscreen.ko; do
+            [ -f "$k" ] || continue
+            echo "== $k =="
+            strings "$k" | grep -m1 "vermagic=" || true
+          done
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ko-android12-5.10-${{ env.KLOCAL }}
+          path: |
+            ko/vts.ko
+            ko/vscreen.ko
+          if-no-files-found: error
