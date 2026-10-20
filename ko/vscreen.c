@@ -188,8 +188,8 @@ static void vs_backend_exit(void)
 typedef struct drm_minor *(*vs_minor_acq_t)(unsigned int);
 static vs_minor_acq_t  p_drm_minor_acquire;
 static void          (*p_drm_minor_release)(struct drm_minor *);
-static int  (*p_dma_buf_vmap)(struct dma_buf *dmabuf, struct dma_buf_map *map);
-static void (*p_dma_buf_vunmap)(struct dma_buf *dmabuf, struct dma_buf_map *map);
+static void *(*p_dma_buf_vmap)(struct dma_buf *dmabuf);
+static void (*p_dma_buf_vunmap)(struct dma_buf *dmabuf, void *vaddr);
 
 static DEFINE_MUTEX(vs_lock);
 static struct drm_device *vs_dev;
@@ -203,8 +203,8 @@ static int vs_drm_symbols(void)
     if (!p_drm_minor_acquire)
         p_drm_minor_acquire = (vs_minor_acq_t)vs_kln("__drm_minor_acquire");
     p_drm_minor_release = (void (*)(struct drm_minor *))vs_kln("drm_minor_release");
-    p_dma_buf_vmap    = (int (*)(struct dma_buf *, struct dma_buf_map *))vs_kln("dma_buf_vmap");
-    p_dma_buf_vunmap  = (void (*)(struct dma_buf *, struct dma_buf_map *))vs_kln("dma_buf_vunmap");
+    p_dma_buf_vmap    = (void *(*)(struct dma_buf *))vs_kln("dma_buf_vmap");
+    p_dma_buf_vunmap  = (void (*)(struct dma_buf *, void *))vs_kln("dma_buf_vunmap");
 
     if (!p_drm_minor_acquire || !p_drm_minor_release) return -ENOENT;
     pr_info("vscreen: drm_minor_acquire=%px dma_buf_vmap=%px\n",
@@ -220,7 +220,6 @@ static int vs_drm_capture(struct vs_info *i)
     struct drm_minor *minor;
     struct drm_device *dev;
     struct drm_plane *plane;
-    struct dma_buf_map vs_map = { 0 };
     int ret = -EAGAIN;
 
     if (!vs_dev) {
@@ -243,11 +242,8 @@ static int vs_drm_capture(struct vs_info *i)
         if (!fb || !fb->obj[0]) continue;
 
         obj = fb->obj[0];
-        if (obj->import_attach && p_dma_buf_vmap) {
-            memset(&vs_map, 0, sizeof(vs_map));
-            if (p_dma_buf_vmap(obj->import_attach->dmabuf, &vs_map) == 0)
-                vaddr = vs_map.vaddr;
-        }
+        if (obj->import_attach && p_dma_buf_vmap)
+            vaddr = p_dma_buf_vmap(obj->import_attach->dmabuf);
         else if (obj->funcs && obj->funcs->vmap)
             vaddr = obj->funcs->vmap(obj);
 
@@ -267,7 +263,7 @@ static int vs_drm_capture(struct vs_info *i)
             ret = 0;
         }
         if (obj->import_attach && p_dma_buf_vunmap)
-            p_dma_buf_vunmap(obj->import_attach->dmabuf, &vs_map);
+            p_dma_buf_vunmap(obj->import_attach->dmabuf, vaddr);
         break;                  /* 只要 primary 的第一帧 */
     }
     mutex_unlock(&dev->mode_config.mutex);
