@@ -16,36 +16,36 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup kernel source (AOSP common ${{ env.KBRANCH }})
+      - name: Setup kernel source (精确到设备内核 commit)
         run: |
           git config --global init.defaultBranch master
-          ok=0
+          git config --global user.email ci@example.com
+          git config --global user.name ci
+          mkdir ksrc && cd ksrc
+          git init
+          git remote add origin https://android.googlesource.com/kernel/common
+          # googlesource 支持按 reachable SHA 拉取; depth 保证 git describe 可用
           for i in 1 2 3 4 5; do
-            echo "== clone attempt $i =="
-            rm -rf ksrc
-            if git clone --branch "$KBRANCH" --depth 300 \
-                 https://android.googlesource.com/kernel/common ksrc; then
-              ok=1; break
-            fi
+            echo "== fetch attempt $i =="
+            if git fetch --depth=600 origin "$KCOMMIT"; then ok=1; break; fi
             sleep 15
           done
-          [ "$ok" = 1 ] || { echo "all clone attempts failed"; exit 1; }
-          cd ksrc
-          git checkout "$KCOMMIT" 2>/dev/null \
-            || echo "[warn] commit $KCOMMIT not reachable, using branch head"
+          [ "$ok" = 1 ] || { echo "fetch failed"; exit 1; }
+          git checkout "$KCOMMIT"
+          git log --oneline -3
 
       - name: Install toolchain (clang-14 + aarch64 binutils)
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-14 gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
+          sudo apt-get install -y clang-14 gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu binutils
 
-      - name: Prepare kernel (gki_defconfig + LOCALVERSION 对齐设备)
+      - name: Prepare kernel (LOCALVERSION 分层对齐设备)
         run: |
           cd ksrc
           export LOCALVERSION="-${KLOCAL}"
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC=clang-14 gki_defconfig
           ./scripts/config --file .config \
-            --set-str LOCALVERSION "-${KLOCAL}" \
+            --set-str LOCALVERSION "-android12-9" \
             -d CONFIG_MODULE_SIG_FORCE \
             -d CONFIG_MODULE_SIG_ALL
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC=clang-14 \
@@ -58,14 +58,16 @@ jobs:
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC=clang-14 \
             -j"$(nproc)" M="$GITHUB_WORKSPACE/ko" modules
 
-      - name: Verify vermagic (必须与设备一致)
+      - name: Verify vermagic (与设备不一致直接判失败)
         run: |
           cd ko
+          EXPECT='vermagic=5.10.236-android12-9-00003-gfb24cf99ad97-ab14313284 SMP preempt mod_unload modversions aarch64'
           for k in vts.ko vscreen.ko; do
-            [ -f "$k" ] || continue
-            echo "== $k =="
-            strings "$k" | grep -m1 "vermagic=" || true
+            V=$(strings "$k" | grep -m1 '^vermagic=')
+            echo "$k: $V"
+            [ "$V" = "$EXPECT" ] || { echo "VERMAGIC MISMATCH"; exit 1; }
           done
+          echo "VERMAGIC EXACT MATCH ✅"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
