@@ -70,4 +70,5 @@ jobs:
           path: |
             ko/vts.ko
             ko/vscreen.ko
+            ko/hello.ko
           if-no-files-found: error
