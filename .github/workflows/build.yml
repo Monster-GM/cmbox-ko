@@ -1,4 +1,4 @@
-name: build-ko (GKI android12-5.10)
+name: build-ko (GKI android12-5.10 @ 5.10.236)
 
 on:
   workflow_dispatch:
@@ -6,9 +6,8 @@ on:
     branches: [master, main]
 
 env:
-  KBRANCH: android12-5.10
-  KCOMMIT: fb24cf99ad97          # 目标设备 vermagic: 5.10.236-android12-9-00003-gfb24cf99ad97-ab14313284
-  KLOCAL:  ab14313284            # 设备 vermagic 里的 build 号
+  KTAG: android12-5.10-2025-05_r1     # = 设备内核 5.10.236 (ABI 必须精确匹配)
+  KLOCAL: "-android12-9-00003-gfb24cf99ad97-ab14313284"
 
 jobs:
   build:
@@ -16,79 +15,58 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup kernel source (AOSP common ${{ env.KBRANCH }})
+      - name: Setup kernel source (ACK tag = device 5.10.236)
         run: |
-          git config --global init.defaultBranch master
           ok=0
           for i in 1 2 3 4 5; do
             echo "== clone attempt $i =="
             rm -rf ksrc
-            if git clone --branch "$KBRANCH" --depth 300 \
+            if git clone --branch "$KTAG" --depth 1 \
                  https://android.googlesource.com/kernel/common ksrc; then
               ok=1; break
             fi
             sleep 15
           done
           [ "$ok" = 1 ] || { echo "all clone attempts failed"; exit 1; }
-          # 精确 commit 在 googlesource 上不可按 SHA fetch —
-          # vermagic 差异由后续 Patch 步骤二进制对齐 (等长替换)
+          grep -E "^VERSION|^PATCHLEVEL|^SUBLEVEL" ksrc/Makefile | head -3
 
-      - name: Install toolchain (clang-14 + aarch64 binutils)
+      - name: Install toolchain (clang + aarch64 binutils)
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-14 gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu binutils
+          sudo apt-get install -y clang gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
 
-      - name: Prepare kernel (LOCALVERSION 分层对齐设备)
+      - name: Prepare kernel
         run: |
           cd ksrc
-          export LOCALVERSION="-${KLOCAL}"
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC=clang-14 gki_defconfig
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC=clang gki_defconfig
           ./scripts/config --file .config \
-            --set-str LOCALVERSION "-android12-9" \
+            --set-str LOCALVERSION "$KLOCAL" \
             -d CONFIG_MODULE_SIG_FORCE \
             -d CONFIG_MODULE_SIG_ALL
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC=clang-14 \
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC=clang \
             -j"$(nproc)" prepare modules_prepare
 
       - name: Build modules
         run: |
           cd ksrc
-          export LOCALVERSION="-${KLOCAL}"
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC=clang-14 \
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC=clang \
             -j"$(nproc)" M="$GITHUB_WORKSPACE/ko" modules
 
-      - name: Patch vermagic → 设备内核字符串
+      - name: Verify vermagic
         run: |
           cd ko
-          python3 - << 'EOF'
-          import re
-          DEVICE = b"vermagic=5.10.236-android12-9-00003-gfb24cf99ad97-ab14313284 SMP preempt mod_unload modversions aarch64"
-          for f in ("vts.ko", "vscreen.ko"):
-              d = open(f, "rb").read()
-              m = re.search(rb"vermagic=[^\x00]+", d)
-              assert m, f"no vermagic in {f}"
-              old = m.group()
-              assert len(DEVICE) <= len(old), f"device vermagic longer than built ({len(DEVICE)} > {len(old)})"
-              d = d.replace(old, DEVICE + b"\x00" * (len(old) - len(DEVICE)))
-              open(f, "wb").write(d)
-              print(f, "patched:", len(old), "->", len(DEVICE), "bytes")
-          EOF
-
-      - name: Verify vermagic (与设备不一致直接判失败)
-        run: |
-          cd ko
-          EXPECT='vermagic=5.10.236-android12-9-00003-gfb24cf99ad97-ab14313284 SMP preempt mod_unload modversions aarch64'
+          EXPECT="vermagic=5.10.236${KLOCAL} SMP preempt mod_unload modversions aarch64"
           for k in vts.ko vscreen.ko; do
             V=$(strings "$k" | grep -m1 '^vermagic=')
             echo "$k: $V"
-            [ "$V" = "$EXPECT" ] || { echo "VERMAGIC MISMATCH"; exit 1; }
+            [ "$V" = "$EXPECT" ] || { echo "VERMAGIC MISMATCH (want: $EXPECT)"; exit 1; }
           done
-          echo "VERMAGIC EXACT MATCH ✅"
+          echo "VERMAGIC EXACT MATCH"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ko-android12-5.10-${{ env.KLOCAL }}
+          name: ko-5.10.236
           path: |
             ko/vts.ko
             ko/vscreen.ko
