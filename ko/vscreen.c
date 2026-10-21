@@ -180,24 +180,6 @@ static void (*p_dma_buf_vunmap)(struct dma_buf *dmabuf, void *vaddr);
 static DEFINE_MUTEX(vs_lock);
 static struct drm_device *vs_dev;
 
-static int vs_drm_symbols(void)
-{
-    int ret = vs_resolve_symbols();
-    if (ret) return ret;
-
-    p_drm_minor_acquire = (vs_minor_acq_t)vs_kln("drm_minor_acquire");
-    if (!p_drm_minor_acquire)
-        p_drm_minor_acquire = (vs_minor_acq_t)vs_kln("__drm_minor_acquire");
-    p_drm_minor_release = (void (*)(struct drm_minor *))vs_kln("drm_minor_release");
-    p_dma_buf_vmap    = (void *(*)(struct dma_buf *))vs_kln("dma_buf_vmap");
-    p_dma_buf_vunmap  = (void (*)(struct dma_buf *, void *))vs_kln("dma_buf_vunmap");
-
-    if (!p_drm_minor_acquire || !p_drm_minor_release) return -ENOENT;
-    pr_info("vscreen: drm_minor_acquire=%px dma_buf_vmap=%px\n",
-            p_drm_minor_acquire, p_dma_buf_vmap);
-    return 0;
-}
-
 /* card0 的 minor 号固定为 64 (DRM_MAJOR=226, minor 64..) */
 #define VSCREEN_CARD_MINOR 64
 
@@ -308,17 +290,11 @@ static int __init vs_init(void)
 {
     int ret = misc_register(&vs_misc);
     if (ret) return ret;
-
-#ifndef CONFIG_FB
-    ret = vs_drm_symbols();
-    if (ret) {
-        misc_deregister(&vs_misc);
-        return ret;
-    }
+    /* DRM: symbol addresses are fed by root via VS_SET_SYMS */
 #else
     vs_backend_init();
 #endif
-    pr_info("vscreen: v0.3 ready\n");
+    pr_info("vscreen: v0.4 ready\n");
     return 0;
 }
 
