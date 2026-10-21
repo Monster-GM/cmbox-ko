@@ -1,14 +1,15 @@
-// vscreen.c — 抓屏内核模块 v0.3
+// vscreen.c — 抓屏内核模块 v0.4
 //
 // 双后端:
-//   A. CONFIG_FB=y  (传统 fbdev 内核): fb notifier + 显存 mmap (v0.2 路线)
-//   B. GKI (CONFIG_FB=n, CONFIG_DRM=y): kallsyms 找到 drm_minor_acquire,
-//      获取 card0 的 drm_device → 遍历 plane → 找活动 fb →
-//      dmabuf vmap / gem funcs->vmap → 拷贝到共享缓冲
-//      (ko 与 GKI 内核同源编译, 结构体布局精确一致, 无需手工偏移表)
+//   A. CONFIG_FB=y  (传统 fbdev 内核): fb notifier + 显存拷贝
+//   B. GKI (CONFIG_FB=n, CONFIG_DRM=y): DRM plane 直读
+//      - 符号地址由 root 用户态从 /proc/kallsyms 解析后经 VS_SET_SYMS 喂入
+//        (kallsyms_lookup_name 在 GKI 上常被 kprobe 加固拦截, 此为唯一稳路)
+//      - ko 与 GKI 内核同源编译, drm/dma_buf 结构体布局精确一致
 //
-// 接口不变:
+// 接口:
 //   /dev/vscreen
+//   ioctl VS_SET_SYMS (root, GKI 后端初始化)
 //   ioctl VS_GET_INFO / VS_CAPTURE / VS_WAIT + mmap
 
 #include <linux/module.h>
@@ -22,14 +23,10 @@
 #include <linux/vmalloc.h>
 #include <linux/wait.h>
 #include <linux/sched.h>
-#include <linux/version.h>
 
 #ifdef CONFIG_FB
 #include <linux/fb.h>
-#endif
-
-#if IS_ENABLED(CONFIG_DRM) && !IS_ENABLED(CONFIG_FB)
-#define VSCREEN_USE_DRM 1
+#else
 #include <drm/drm_device.h>
 #include <drm/drm_mode_object.h>
 #include <drm/drm_plane.h>
@@ -52,23 +49,21 @@ struct vs_info {
     __u32 frame_size;
     __u32 seq;
 };
-#define VS_GET_INFO  _IOR(VS_IOC_MAGIC, 1, struct vs_info)
-#define VS_CAPTURE   _IO (VS_IOC_MAGIC, 2)
-#define VS_WAIT      _IOW(VS_IOC_MAGIC, 3, __u32)
-
-/* 用户态(root)从 /proc/kallsyms 解析地址后喂给 ko */
 struct vs_syms {
     __u64 drm_minor_acquire;
     __u64 drm_minor_release;
     __u64 dma_buf_vmap;
     __u64 dma_buf_vunmap;
 };
+#define VS_GET_INFO  _IOR(VS_IOC_MAGIC, 1, struct vs_info)
+#define VS_CAPTURE   _IO (VS_IOC_MAGIC, 2)
+#define VS_WAIT      _IOW(VS_IOC_MAGIC, 3, __u32)
 #define VS_SET_SYMS  _IOW(VS_IOC_MAGIC, 4, struct vs_syms)
 
 static DECLARE_WAIT_QUEUE_HEAD(vs_wq);
 static atomic_t frame_seq = ATOMIC_INIT(0);
 
-/* ---- 共享输出帧缓冲 (用户态 mmap 目标) ---- */
+/* ---- 输出帧缓冲 (用户态 mmap 目标) ---- */
 static void    *vs_buf;
 static size_t   vs_buf_size;
 
@@ -82,8 +77,26 @@ static int vs_ensure_buf(size_t need)
     return 0;
 }
 
+static long vs_ioctl(struct file *f, unsigned int cmd, unsigned long arg);
+static int  vs_mmap(struct file *f, struct vm_area_struct *vma);
+
+static const struct file_operations vs_fops = {
+    .owner          = THIS_MODULE,
+    .unlocked_ioctl = vs_ioctl,
+    .compat_ioctl   = vs_ioctl,
+    .mmap           = vs_mmap,
+};
+
+static struct miscdevice vs_misc = {
+    .minor = MISC_DYNAMIC_MINOR,
+    .name  = VS_NAME,
+    .fops  = &vs_fops,
+    .mode  = 0666,
+};
+
 #ifdef CONFIG_FB
-/* ============ 后端 A: fbdev ============ */
+/* ================= 后端 A: fbdev ================= */
+
 static struct fb_info *vs_fb;
 static int vs_fb_index = 0;
 module_param(vs_fb_index, int, 0444);
@@ -107,40 +120,7 @@ static int vs_fb_notifier(struct notifier_block *nb, unsigned long event, void *
 
 static struct notifier_block vs_nb = { .notifier_call = vs_fb_notifier };
 
-#else
-/* ============ 后端 B: GKI DRM ============ */
-#define VSCREEN_USE_DRM 1
-
-
-struct drm_minor;                       /* 由内核树头文件提供真实定义 */
-
-
-#endif /* CONFIG_FB */
-
-/* ================================================================
- * 以下为设备接口层 (两种后端共用接口, 内部分发)
- * ================================================================ */
-static long vs_ioctl(struct file *f, unsigned int cmd, unsigned long arg);
-static int  vs_mmap(struct file *f, struct vm_area_struct *vma);
-
-static const struct file_operations vs_fops = {
-    .owner          = THIS_MODULE,
-    .unlocked_ioctl = vs_ioctl,
-    .compat_ioctl   = vs_ioctl,
-    .mmap           = vs_mmap,
-};
-
-static struct miscdevice vs_misc = {
-    .minor = MISC_DYNAMIC_MINOR,
-    .name  = VS_NAME,
-    .fops  = &vs_fops,
-    .mode  = 0666,
-};
-
-#ifdef CONFIG_FB
-/* ---- fbdev 后端实现 ---- */
-
-static int vs_backend_capture(struct vs_info *i)
+static int vs_fb_capture(struct vs_info *i)
 {
     if (!vs_fb) return -ENODEV;
     i->width  = vs_fb->var.xres;
@@ -148,7 +128,6 @@ static int vs_backend_capture(struct vs_info *i)
     i->stride = vs_fb->fix.line_length;
     i->fourcc = vs_fb->var.bits_per_pixel;
     i->frame_size = vs_fb->fix.line_length * vs_fb->var.yres;
-
     if (vs_ensure_buf(i->frame_size)) return -ENOMEM;
     memcpy(vs_buf, vs_fb->screen_buffer, i->frame_size);
     atomic_inc(&frame_seq);
@@ -156,32 +135,37 @@ static int vs_backend_capture(struct vs_info *i)
     return 0;
 }
 
-static int __init vs_backend_init(void)
-{
-    int ret = fb_register_client(&vs_nb);
-    if (ret) return ret;
-    return 0;
-}
-
-static void vs_backend_exit(void)
-{
-    fb_unregister_client(&vs_nb);
-}
-
 #else
-/* ---- GKI DRM 后端实现 ---- */
+/* ================= 后端 B: GKI DRM ================= */
 
 typedef struct drm_minor *(*vs_minor_acq_t)(unsigned int);
 static vs_minor_acq_t  p_drm_minor_acquire;
 static void          (*p_drm_minor_release)(struct drm_minor *);
 static void *(*p_dma_buf_vmap)(struct dma_buf *dmabuf);
 static void (*p_dma_buf_vunmap)(struct dma_buf *dmabuf, void *vaddr);
+static int   vs_syms_ready;
 
 static DEFINE_MUTEX(vs_lock);
 static struct drm_device *vs_dev;
 
-/* card0 的 minor 号固定为 64 (DRM_MAJOR=226, minor 64..) */
-#define VSCREEN_CARD_MINOR 64
+#define VSCREEN_CARD_MINOR 64          /* card0: DRM_MAJOR 226, minor 64 */
+
+static int vs_set_syms(void __user *arg)
+{
+    struct vs_syms sy;
+    if (copy_from_user(&sy, arg, sizeof(sy)))
+        return -EFAULT;
+    p_drm_minor_acquire = (vs_minor_acq_t)(unsigned long)sy.drm_minor_acquire;
+    p_drm_minor_release = (void (*)(struct drm_minor *))(unsigned long)sy.drm_minor_release;
+    p_dma_buf_vmap      = (void *(*)(struct dma_buf *))(unsigned long)sy.dma_buf_vmap;
+    p_dma_buf_vunmap    = (void (*)(struct dma_buf *, void *))(unsigned long)sy.dma_buf_vunmap;
+    if (!p_drm_minor_acquire || !p_drm_minor_release)
+        return -EINVAL;
+    vs_syms_ready = 1;
+    pr_info("vscreen: syms fed acq=%px rel=%px vmap=%px\n",
+            p_drm_minor_acquire, p_drm_minor_release, p_dma_buf_vmap);
+    return 0;
+}
 
 static int vs_drm_capture(struct vs_info *i)
 {
@@ -190,16 +174,21 @@ static int vs_drm_capture(struct vs_info *i)
     struct drm_plane *plane;
     int ret = -EAGAIN;
 
-    if (!vs_syms_ready) return -EAGAIN;      /* 等用户态喂符号 */
+    if (!vs_syms_ready) return -EAGAIN;   /* 等用户态喂符号 */
+
+    mutex_lock(&vs_lock);
     if (!vs_dev) {
-        if (!p_drm_minor_acquire) return -ENOENT;
         minor = p_drm_minor_acquire(VSCREEN_CARD_MINOR);
-        if (IS_ERR(minor)) return PTR_ERR(minor);
+        if (IS_ERR(minor)) {
+            mutex_unlock(&vs_lock);
+            return PTR_ERR(minor);
+        }
         vs_dev = minor->dev;
         p_drm_minor_release(minor);
-        pr_info("vscreen: drm_device attached %s\n", vs_dev->unique);
+        pr_info("vscreen: drm_device attached\n");
     }
     dev = vs_dev;
+    mutex_unlock(&vs_lock);
 
     mutex_lock(&dev->mode_config.mutex);
     drm_for_each_plane(plane, dev) {
@@ -209,16 +198,14 @@ static int vs_drm_capture(struct vs_info *i)
 
         fb = plane->state ? plane->state->fb : plane->fb;
         if (!fb || !fb->obj[0]) continue;
-
         obj = fb->obj[0];
+
         if (obj->import_attach && p_dma_buf_vmap)
             vaddr = p_dma_buf_vmap(obj->import_attach->dmabuf);
         else if (obj->funcs && obj->funcs->vmap)
             vaddr = obj->funcs->vmap(obj);
+        if (!vaddr) continue;            /* secure 层取不到, 跳过 */
 
-        if (!vaddr) continue;   /* secure 层取不到, 跳过 */
-
-        /* 命中第一个可读的活动 fb */
         i->width  = fb->width;
         i->height = fb->height;
         i->stride = fb->pitches[0];
@@ -233,14 +220,16 @@ static int vs_drm_capture(struct vs_info *i)
         }
         if (obj->import_attach && p_dma_buf_vunmap)
             p_dma_buf_vunmap(obj->import_attach->dmabuf, vaddr);
-        break;                  /* 只要 primary 的第一帧 */
+        break;                            /* 第一个可读的活动 fb */
     }
     mutex_unlock(&dev->mode_config.mutex);
     return ret;
 }
+
 #endif /* CONFIG_FB */
 
-/* ---- 统一 ioctl / mmap ---- */
+/* ================= 统一设备接口 ================= */
+
 static long vs_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 {
     struct vs_info i;
@@ -253,7 +242,7 @@ static long vs_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 #endif
     case VS_GET_INFO:
 #ifdef CONFIG_FB
-        if (vs_backend_capture(&i)) return -ENODEV;
+        if (vs_fb_capture(&i)) return -ENODEV;
 #else
         if (vs_drm_capture(&i)) return -EAGAIN;
 #endif
@@ -263,7 +252,7 @@ static long vs_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 
     case VS_CAPTURE:
 #ifdef CONFIG_FB
-        return vs_backend_capture(&i);
+        return vs_fb_capture(&i);
 #else
         {
             struct vs_info tmp;
@@ -290,9 +279,11 @@ static int __init vs_init(void)
 {
     int ret = misc_register(&vs_misc);
     if (ret) return ret;
-    /* DRM: symbol addresses are fed by root via VS_SET_SYMS */
+#ifdef CONFIG_FB
+    ret = fb_register_client(&vs_nb);
+    if (ret) { misc_deregister(&vs_misc); return ret; }
 #else
-    vs_backend_init();
+    /* DRM: 符号地址由 root 经 VS_SET_SYMS 喂入 */
 #endif
     pr_info("vscreen: v0.4 ready\n");
     return 0;
@@ -300,11 +291,8 @@ static int __init vs_init(void)
 
 static void __exit vs_exit(void)
 {
-#ifndef CONFIG_FB
-    /* vs_dev 由 drm_minor_release 已释放, 无需额外清理 */
-#endif
 #ifdef CONFIG_FB
-    vs_backend_exit();
+    fb_unregister_client(&vs_nb);
 #endif
     misc_deregister(&vs_misc);
     if (vs_buf) vfree(vs_buf);
@@ -313,4 +301,4 @@ static void __exit vs_exit(void)
 module_init(vs_init);
 module_exit(vs_exit);
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("screen capture bridge v0.3 (fbdev / GKI DRM dual backend)");
+MODULE_DESCRIPTION("screen capture bridge v0.4 (fbdev / GKI DRM, usermode-fed syms)");
