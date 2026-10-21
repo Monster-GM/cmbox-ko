@@ -23,6 +23,7 @@
 #include <linux/vmalloc.h>
 #include <linux/wait.h>
 #include <linux/sched.h>
+#include <linux/debugfs.h>
 
 #ifdef CONFIG_FB
 #include <linux/fb.h>
@@ -93,6 +94,9 @@ static struct miscdevice vs_misc = {
     .fops  = &vs_fops,
     .mode  = 0666,
 };
+
+/* debugfs 兜底通道: /sys/kernel/debug/vscreen (root 可访问, 不依赖 devtmpfs) */
+static struct dentry *vs_dbg;
 
 #ifdef CONFIG_FB
 /* ================= 后端 A: fbdev ================= */
@@ -277,8 +281,18 @@ static int vs_mmap(struct file *f, struct vm_area_struct *vma)
 
 static int __init vs_init(void)
 {
-    int ret = misc_register(&vs_misc);
-    if (ret) return ret;
+    int ret;
+
+    /* debugfs 兜底: 即使 misc 注册在目标固件上不可见也可用 */
+    vs_dbg = debugfs_create_file(VS_NAME, 0666, NULL, NULL, &vs_fops);
+
+    ret = misc_register(&vs_misc);
+    if (ret) {
+        if (IS_ERR_OR_NULL(vs_dbg))
+            return ret;          /* 两个都没成 */
+        pr_info("vscreen: misc failed (%d), debugfs only\n", ret);
+        return 0;
+    }
 #ifdef CONFIG_FB
     ret = fb_register_client(&vs_nb);
     if (ret) { misc_deregister(&vs_misc); return ret; }
@@ -294,6 +308,7 @@ static void __exit vs_exit(void)
 #ifdef CONFIG_FB
     fb_unregister_client(&vs_nb);
 #endif
+    if (!IS_ERR_OR_NULL(vs_dbg)) debugfs_remove(vs_dbg);
     misc_deregister(&vs_misc);
     if (vs_buf) vfree(vs_buf);
 }

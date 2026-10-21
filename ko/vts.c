@@ -12,6 +12,7 @@
 #include <linux/input.h>
 #include <linux/input/mt.h>
 #include <linux/slab.h>
+#include <linux/debugfs.h>
 
 #define VTS_NAME "vts"
 
@@ -111,6 +112,9 @@ static struct miscdevice vts_misc = {
     .mode  = 0666,          /* SELinux permissive + uid1000 场景 */
 };
 
+/* debugfs 兜底: /sys/kernel/debug/vts */
+static struct dentry *vts_dbg;
+
 static int __init vts_init(void)
 {
     int ret;
@@ -136,8 +140,16 @@ static int __init vts_init(void)
     ret = input_register_device(vts_dev);
     if (ret) { input_free_device(vts_dev); return ret; }
 
+    vts_dbg = debugfs_create_file(VTS_NAME, 0666, NULL, NULL, &vts_fops);
+
     ret = misc_register(&vts_misc);
-    if (ret) { input_unregister_device(vts_dev); return ret; }
+    if (ret) {
+        if (IS_ERR_OR_NULL(vts_dbg)) {
+            input_unregister_device(vts_dev);
+            return ret;
+        }
+        pr_info("vts: misc failed (%d), debugfs only\n", ret);
+    }
 
     pr_info("vts: ready /dev/%s panel=%dx%d\n", VTS_NAME, panel_w, panel_h);
     return 0;
@@ -145,6 +157,7 @@ static int __init vts_init(void)
 
 static void __exit vts_exit(void)
 {
+    if (!IS_ERR_OR_NULL(vts_dbg)) debugfs_remove(vts_dbg);
     misc_deregister(&vts_misc);
     /* 归还所有 slot, 防止手指"卡在屏幕上" */
     input_mt_slot(vts_dev, 0);
