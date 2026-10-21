@@ -22,7 +22,6 @@
 #include <linux/vmalloc.h>
 #include <linux/wait.h>
 #include <linux/sched.h>
-#include <linux/kprobes.h>
 #include <linux/version.h>
 
 #ifdef CONFIG_FB
@@ -112,30 +111,9 @@ static struct notifier_block vs_nb = { .notifier_call = vs_fb_notifier };
 /* ============ 后端 B: GKI DRM ============ */
 #define VSCREEN_USE_DRM 1
 
-typedef unsigned long (*kallsyms_lookup_name_t)(const char *name);
-static kallsyms_lookup_name_t vs_kln;
 
 struct drm_minor;                       /* 由内核树头文件提供真实定义 */
 
-static int vs_resolve_symbols(void)
-{
-    struct kprobe kp = { .symbol_name = "kallsyms_lookup_name" };
-    int ret = register_kprobe(&kp);
-    if (ret < 0) {
-        pr_err("vscreen: kprobe for kallsyms_lookup_name failed: %d\n", ret);
-        return ret;
-    }
-    vs_kln = (kallsyms_lookup_name_t)kp.addr;
-    unregister_kprobe(&kp);
-    if (!vs_kln) return -ENOENT;
-
-    /* 校验关键符号可寻址 */
-    if (!vs_kln("drm_minor_acquire") || !vs_kln("drm_minor_release")) {
-        pr_err("vscreen: drm_minor symbols not found\n");
-        return -ENOENT;
-    }
-    return 0;
-}
 
 #endif /* CONFIG_FB */
 
