@@ -57,6 +57,15 @@ struct vs_info {
 #define VS_CAPTURE   _IO (VS_IOC_MAGIC, 2)
 #define VS_WAIT      _IOW(VS_IOC_MAGIC, 3, __u32)
 
+/* 用户态(root)从 /proc/kallsyms 解析地址后喂给 ko */
+struct vs_syms {
+    __u64 drm_minor_acquire;
+    __u64 drm_minor_release;
+    __u64 dma_buf_vmap;
+    __u64 dma_buf_vunmap;
+};
+#define VS_SET_SYMS  _IOW(VS_IOC_MAGIC, 4, struct vs_syms)
+
 static DECLARE_WAIT_QUEUE_HEAD(vs_wq);
 static atomic_t frame_seq = ATOMIC_INIT(0);
 
@@ -221,6 +230,7 @@ static int vs_drm_capture(struct vs_info *i)
     struct drm_plane *plane;
     int ret = -EAGAIN;
 
+    if (!vs_syms_ready) return -EAGAIN;      /* 等用户态喂符号 */
     if (!vs_dev) {
         if (!p_drm_minor_acquire) return -ENOENT;
         minor = p_drm_minor_acquire(VSCREEN_CARD_MINOR);
@@ -277,6 +287,10 @@ static long vs_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
     __u32 last;
 
     switch (cmd) {
+#ifndef CONFIG_FB
+    case VS_SET_SYMS:
+        return vs_set_syms((void __user *)arg);
+#endif
     case VS_GET_INFO:
 #ifdef CONFIG_FB
         if (vs_backend_capture(&i)) return -ENODEV;
